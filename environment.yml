@@ -1,0 +1,23 @@
+name: facets-env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - scikit-learn
+  - statsmodels
+  - prophet
+  - pytorch
+  - pytorch-forecasting
+  - transformers
+  - huggingface_hub
+  - langchain
+  - openai
+  - matplotlib
+  - plotly
+  - seaborn
+  - hdbscan
+  - jupyterlab
+  - pip
