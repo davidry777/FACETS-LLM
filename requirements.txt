@@ -13,3 +13,4 @@ matplotlib
 plotly
 seaborn
 hdbscan
+openpyxl
