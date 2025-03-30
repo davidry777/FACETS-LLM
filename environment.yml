@@ -15,7 +15,7 @@ dependencies:
   - huggingface_hub
   - langchain
   - openai
-  - openpyxl
+  - openpyxl=3.0.9
   - matplotlib
   - plotly
   - seaborn
