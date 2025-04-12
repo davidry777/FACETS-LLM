@@ -22,3 +22,5 @@ dependencies:
   - hdbscan
   - jupyterlab
   - pip
+  - pip:
+    - openai-agents
