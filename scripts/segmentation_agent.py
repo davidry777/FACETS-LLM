@@ -9,11 +9,14 @@ from typing import List, Dict, Any
 from datetime import datetime
 from openai import OpenAI
 from agents.agent import Agent
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 
 
 class SegmentationAgent(Agent):
     """
-    Agent that uses DeepSeek to segment customers based on RFM data
+    Agent that uses K-means clustering to segment customers based on RFM data,
+    then uses DeepSeek to interpret the segments
     """
     name = "Segmentation Agent"
     color = Agent.CYAN
@@ -36,173 +39,249 @@ class SegmentationAgent(Agent):
         self.segments = None
         self.segment_descriptions = None
         self.segment_strategies = None
+        self.kmeans_model = None
+        self.scaler = None
         
         self.log(f"Segmentation Agent is ready with {self.MODEL}")
     
-    def load_data(self, data_path: str) -> bool:
-        """
-        Load the RFM data for segmentation
-        """
-        self.log(f"Loading data from {data_path}")
-        
-        try:
-            # Determine file type and load accordingly
-            if data_path.endswith('.parquet'):
-                self.rfm_data = pd.read_parquet(data_path)
-            elif data_path.endswith('.csv'):
-                self.rfm_data = pd.read_csv(data_path)
-            else:
-                self.log(f"Unsupported file format: {data_path}")
-                return False
-            
-            # Ensure required columns exist
-            required_columns = ['Customer ID', 'Recency', 'Frequency', 'Monetary']
-            for col in required_columns:
-                if col not in self.rfm_data.columns:
-                    self.log(f"Missing required column: {col}")
-                    return False
-            
-            self.log(f"Data loaded successfully with {len(self.rfm_data)} customers")
-            return True
-        
-        except Exception as e:
-            self.log(f"Error loading data: {str(e)}")
-            return False
+    # [Keep existing load_data method]
     
     def _get_rfm_summary(self) -> Dict[str, Any]:
         """Analyze RFM data and create a summary for the LLM"""
-        summary = {}
+        # [Keep existing implementation]
+    
+    def perform_segmentation(self, num_segments: int = 5) -> Dict[str, Any]:
+        """
+        Perform customer segmentation using K-means clustering
+        """
+        self.log(f"Starting K-means segmentation with {num_segments} clusters")
         
-        # Calculate basic statistics
-        for metric in ['Recency', 'Frequency', 'Monetary']:
-            summary[metric] = {
-                "min": float(self.rfm_data[metric].min()),
-                "max": float(self.rfm_data[metric].max()),
-                "mean": float(self.rfm_data[metric].mean()),
-                "median": float(self.rfm_data[metric].median()),
-                "p25": float(self.rfm_data[metric].quantile(0.25)),
-                "p75": float(self.rfm_data[metric].quantile(0.75))
+        if self.rfm_data is None:
+            self.log("No data loaded. Please load data first.")
+            return {}
+        
+        # Extract RFM features
+        features = self.rfm_data[['Recency', 'Frequency', 'Monetary']].copy()
+        
+        # Scale the features
+        self.scaler = StandardScaler()
+        scaled_features = self.scaler.fit_transform(features)
+        
+        # Apply K-means clustering
+        self.kmeans_model = KMeans(
+            n_clusters=num_segments,
+            random_state=42,
+            n_init=10
+        )
+        self.rfm_data['segment_id'] = self.kmeans_model.fit_predict(scaled_features)
+        
+        # Get cluster centers in original scale
+        centers = self.scaler.inverse_transform(self.kmeans_model.cluster_centers_)
+        
+        # Analyze clusters and generate segment names
+        segment_info = {}
+        for i in range(num_segments):
+            segment_mask = self.rfm_data['segment_id'] == i
+            segment_data = self.rfm_data[segment_mask]
+            
+            # Calculate segment statistics
+            segment_info[str(i)] = {
+                "segment_id": i,
+                "segment_name": f"Segment {i+1}",  # Will update with meaningful names
+                "count": int(segment_mask.sum()),
+                "percentage": float(segment_mask.sum() / len(self.rfm_data) * 100),
+                "avg_recency": float(segment_data['Recency'].mean()),
+                "avg_frequency": float(segment_data['Frequency'].mean()),
+                "avg_monetary": float(segment_data['Monetary'].mean()),
+                "total_monetary": float(segment_data['Monetary'].sum()),
+                "center": {
+                    "recency": float(centers[i][0]),
+                    "frequency": float(centers[i][1]),
+                    "monetary": float(centers[i][2])
+                },
+                "criteria": {
+                    "recency": {"center": float(centers[i][0])},
+                    "frequency": {"center": float(centers[i][1])},
+                    "monetary": {"center": float(centers[i][2])}
+                }
             }
         
-        # Calculate correlations
-        corr_matrix = self.rfm_data[['Recency', 'Frequency', 'Monetary']].corr()
-        summary["correlations"] = {
-            "Recency_Frequency": float(corr_matrix.loc['Recency', 'Frequency']),
-            "Recency_Monetary": float(corr_matrix.loc['Recency', 'Monetary']),
-            "Frequency_Monetary": float(corr_matrix.loc['Frequency', 'Monetary'])
+        # Use LLM to name and describe the segments
+        self.segments = self._name_segments(segment_info)
+        
+        # Update segment names in dataframe
+        for seg_id, segment in self.segments.items():
+            self.rfm_data.loc[self.rfm_data['segment_id'] == int(seg_id), 'segment_name'] = segment['segment_name']
+        
+        # Generate segment descriptions and strategies with LLM
+        try:
+            self.log(f"Calling {self.MODEL} to generate segment insights")
+            response = self.client.chat.completions.create(
+                model=self.MODEL,
+                messages=self.messages_for_segment_insights(self.segments),
+                max_tokens=2048
+            )
+            
+            content = response.choices[0].message.content
+            segment_insights = self.extract_json(content)
+            
+            if not segment_insights or "descriptions" not in segment_insights or "strategies" not in segment_insights:
+                self.log("Failed to parse segment insights from LLM response")
+                insights = self._get_fallback_insights(self.segments)
+                self.segment_descriptions = insights["descriptions"]
+                self.segment_strategies = insights["strategies"]
+            else:
+                self.segment_descriptions = segment_insights["descriptions"]
+                self.segment_strategies = segment_insights["strategies"]
+        except Exception as e:
+            self.log(f"Error using LLM for segment insights: {str(e)}")
+            insights = self._get_fallback_insights(self.segments)
+            self.segment_descriptions = insights["descriptions"]
+            self.segment_strategies = insights["strategies"]
+        
+        # Compile results
+        results = {
+            "num_customers": len(self.rfm_data),
+            "num_segments": len(self.segments),
+            "segments": self.segments,
+            "segment_descriptions": self.segment_descriptions,
+            "segment_strategies": self.segment_strategies,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         
-        return summary
+        # Save results
+        with open("output/kmeans_segmentation_results.json", "w") as f:
+            json.dump(results, f, indent=2)
+        
+        self.log(f"K-means segmentation complete - created {len(self.segments)} segments")
+        return results
     
-    def messages_for_segmentation_criteria(self, rfm_summary: Dict[str, Any], num_segments: int) -> List[Dict[str, str]]:
+    def _name_segments(self, segment_info: Dict[str, Any]) -> Dict[str, Any]:
+        """Use LLM to generate meaningful names for K-means clusters"""
+        self.log("Generating meaningful segment names based on cluster characteristics")
+        
+        system_message = """You are an expert in marketing analytics and customer segmentation.
+        Based on the RFM (Recency, Frequency, Monetary) characteristics of customer clusters, 
+        provide meaningful, descriptive names and brief descriptions for each segment."""
+        
+        user_message = """
+        I have performed K-means clustering on customer data using RFM values. 
+        Please provide a meaningful name and brief description for each segment based on these characteristics.
+        
+        For reference:
+        - Recency: Days since last purchase (lower is better)
+        - Frequency: Number of purchases (higher is better)
+        - Monetary: Total spend amount (higher is better)
+        
+        Here are the segments and their characteristics:
         """
-        Create the message list for generating segmentation criteria
-        """
-        system_message = """You are an expert in customer segmentation and marketing analytics.
-        Create segmentation criteria for an e-commerce business based on RFM (Recency, Frequency, Monetary) data.
-        Respond with a JSON array of segment definitions with clear criteria for each."""
         
-        user_message = f"""
-        Here's a summary of the RFM data distribution:
+        for seg_id, segment in segment_info.items():
+            user_message += f"""
+            Segment {int(seg_id) + 1}:
+            - Recency (center): {segment['center']['recency']:.1f} days
+            - Frequency (center): {segment['center']['frequency']:.1f} purchases
+            - Monetary (center): ${segment['center']['monetary']:.2f}
+            - Contains {segment['count']} customers ({segment['percentage']:.1f}% of total)
+            
+            """
         
-        Recency (days since last purchase): 
-        - Min: {rfm_summary["Recency"]["min"]}, Max: {rfm_summary["Recency"]["max"]}
-        - Mean: {rfm_summary["Recency"]["mean"]}, Median: {rfm_summary["Recency"]["median"]}
-        - 25th percentile: {rfm_summary["Recency"]["p25"]}, 75th percentile: {rfm_summary["Recency"]["p75"]}
+        user_message += """
+        Return a JSON object where keys are segment IDs (0, 1, 2, etc.) and values are objects with:
+        - "segment_name": A concise, meaningful name (like "Champions", "At Risk", etc.)
+        - "description": A brief description of this customer segment
         
-        Frequency (number of purchases):
-        - Min: {rfm_summary["Frequency"]["min"]}, Max: {rfm_summary["Frequency"]["max"]}
-        - Mean: {rfm_summary["Frequency"]["mean"]}, Median: {rfm_summary["Frequency"]["median"]}
-        - 25th percentile: {rfm_summary["Frequency"]["p25"]}, 75th percentile: {rfm_summary["Frequency"]["p75"]}
-        
-        Monetary (total spend):
-        - Min: {rfm_summary["Monetary"]["min"]}, Max: {rfm_summary["Monetary"]["max"]}
-        - Mean: {rfm_summary["Monetary"]["mean"]}, Median: {rfm_summary["Monetary"]["median"]}
-        - 25th percentile: {rfm_summary["Monetary"]["p25"]}, 75th percentile: {rfm_summary["Monetary"]["p75"]}
-        
-        Correlations:
-        - Recency-Frequency: {rfm_summary["correlations"]["Recency_Frequency"]}
-        - Recency-Monetary: {rfm_summary["correlations"]["Recency_Monetary"]}
-        - Frequency-Monetary: {rfm_summary["correlations"]["Frequency_Monetary"]}
-        
-        Please create {num_segments} customer segments with clear criteria for each. For each segment:
-        1. Define specific ranges or thresholds for Recency, Frequency, and Monetary values
-        2. Give the segment a descriptive name (like "Champions", "At Risk", etc.)
-        3. Provide a brief description of this customer segment
-        
-        Format your response as a JSON array where each object has the following structure:
-        [
-            {{
-                "segment_id": 1,
+        Example:
+        {
+            "0": {
                 "segment_name": "Champions",
-                "criteria": {{
-                    "recency": {{
-                        "min": null,
-                        "max": 30
-                    }},
-                    "frequency": {{
-                        "min": 10,
-                        "max": null
-                    }},
-                    "monetary": {{
-                        "min": 1000,
-                        "max": null
-                    }}
-                }},
                 "description": "Recent customers who buy often and spend the most"
-            }},
-            ... (and so on)
-        ]
-        
-        Return only the JSON array.
+            },
+            "1": {
+                "segment_name": "At Risk",
+                "description": "Previously active customers who haven't purchased recently"
+            }
+        }
         """
         
-        return [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message},
-            {"role": "assistant", "content": "["}
-        ]
+        try:
+            response = self.client.chat.completions.create(
+                model=self.MODEL,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": user_message}
+                ],
+                max_tokens=1024
+            )
+            
+            content = response.choices[0].message.content
+            segment_names = self.extract_json(content)
+            
+            if not segment_names:
+                self.log("Failed to parse segment names from LLM response, using generic names")
+                return segment_info
+            
+            # Update segment names and descriptions
+            for seg_id, new_info in segment_names.items():
+                if seg_id in segment_info:
+                    segment_info[seg_id]["segment_name"] = new_info["segment_name"]
+                    segment_info[seg_id]["description"] = new_info["description"]
+            
+            return segment_info
+            
+        except Exception as e:
+            self.log(f"Error using LLM for segment naming: {str(e)}")
+            return segment_info
     
-    def messages_for_segment_insights(self, segments: Dict[str, Any]) -> List[Dict[str, str]]:
+    def segment_customer(self, customer_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Create the message list for generating segment insights
+        Segment a single customer based on their RFM data using the trained K-means model
         """
-        system_message = """You are an expert in marketing analytics and customer relationship management.
-        Provide detailed descriptions and specific marketing strategies for customer segments.
-        Respond with a JSON object containing detailed insights about each segment."""
+        self.log(f"Segmenting individual customer using K-means model")
         
-        user_message = f"""
-        I have customer segments based on RFM (Recency, Frequency, Monetary) analysis. For each segment, provide:
-        1. A detailed description of the customer behavior and characteristics
-        2. Specific marketing strategies and recommendations customized for this segment
-
-        Here are the segments:
-        {json.dumps(segments)}
+        if self.kmeans_model is None or self.scaler is None:
+            self.log("No segmentation model. Please perform segmentation first.")
+            return {"error": "No segmentation model available"}
         
-        Format your response as a JSON object with two keys: "descriptions" and "strategies", each containing an object with segment IDs as keys:
-        {{
-            "descriptions": {{
-                "1": "Detailed description for segment 1...",
-                "2": "Detailed description for segment 2...",
-                ...
-            }},
-            "strategies": {{
-                "1": "Marketing strategies for segment 1...",
-                "2": "Marketing strategies for segment 2...",
-                ...
-            }}
-        }}
+        # Validate input
+        required_fields = ['Recency', 'Frequency', 'Monetary']
+        for field in required_fields:
+            if field not in customer_data:
+                self.log(f"Missing required field: {field}")
+                return {"error": f"Missing required field: {field}"}
         
-        Be specific and detailed in your recommendations. Include practical action items that a marketing team could implement.
-        Return only the JSON object.
-        """
+        # Prepare customer data
+        customer_features = np.array([
+            customer_data['Recency'],
+            customer_data['Frequency'],
+            customer_data['Monetary']
+        ]).reshape(1, -1)
         
-        return [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message},
-            {"role": "assistant", "content": "{"}
-        ]
-    
+        # Scale features
+        scaled_features = self.scaler.transform(customer_features)
+        
+        # Predict segment
+        segment_id = int(self.kmeans_model.predict(scaled_features)[0])
+        segment_id_str = str(segment_id)
+        
+        if segment_id_str in self.segments:
+            segment = self.segments[segment_id_str]
+            result = {
+                "segment_id": segment_id,
+                "segment_name": segment["segment_name"],
+                "description": segment["description"] if "description" in segment else "",
+                "recommended_strategy": self.segment_strategies.get(segment_id_str, "")
+            }
+            return result
+        else:
+            self.log(f"Segment ID {segment_id} not found in segments dictionary")
+            return {
+                "segment_id": segment_id,
+                "segment_name": f"Segment {segment_id + 1}",
+                "description": "Unknown segment",
+                "recommended_strategy": "Not available"
+            }
+        
     def messages_for_report(self, segments: Dict[str, Any], descriptions: Dict[str, str], strategies: Dict[str, str]) -> List[Dict[str, str]]:
         """
         Create the message list for generating a report
