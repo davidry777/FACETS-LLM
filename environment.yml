@@ -14,6 +14,7 @@ dependencies:
   - transformers
   - huggingface_hub
   - langchain
+  - peft
   - openai
   - openpyxl=3.0.9
   - matplotlib
