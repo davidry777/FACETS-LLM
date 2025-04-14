@@ -16,7 +16,7 @@ class FrontierAgent(Agent):
 
     name = "Frontier Agent"
     color = Agent.BLUE
-    model="deepseek-r1:1.5b",
+    model="deepseek-r1:1.5b"
     
     def __init__(self, collection):
         """
