@@ -1,1 +1,3 @@
 .DS_Store
+scripts/__pycache__/agent.cpython-311.pyc
+scripts/__pycache__/segmentation_agent.cpython-311.pyc
