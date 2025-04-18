@@ -1,3 +1,4 @@
 data/cleaned/*.parquet filter=lfs diff=lfs merge=lfs -text
 data/raw/*.xlsx filter=lfs diff=lfs merge=lfs -text
 data/raw/rossmann-store-sales/*.csv filter=lfs diff=lfs merge=lfs -text
+data/raw/rossman-store-sales/*.csv filter=lfs diff=lfs merge=lfs -text
