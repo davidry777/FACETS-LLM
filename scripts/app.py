@@ -59,8 +59,8 @@ class AppState:
             if os.path.exists(file):
                 try:
                     os.remove(file)
-                except:
-                    pass
+                except OSError as e:
+                    print(f"Error removing file {file}: {e}")
         self.temp_files = []
 
 # Create state
