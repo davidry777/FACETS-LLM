@@ -23,7 +23,6 @@ dependencies:
   - hdbscan
   - jupyterlab
   - modal
-  - gradio
   - pip
   - pip:
     - openai-agents
