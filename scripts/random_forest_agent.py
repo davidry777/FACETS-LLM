@@ -5,7 +5,7 @@ import re
 from typing import List
 from sentence_transformers import SentenceTransformer
 import joblib
-from agents.agent import Agent
+from agent import Agent
 
 
 

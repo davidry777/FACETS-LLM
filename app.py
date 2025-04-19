@@ -7,29 +7,32 @@ import tempfile
 from typing import Dict, Any, List
 from pathlib import Path
 
-# Import agents
+# Safer path manipulation - don't modify sys.path directly
+import sys
+from os.path import join, dirname, abspath
+
+# Add scripts directory to Python path safely
+current_dir = dirname(abspath(__file__))
+scripts_dir = join(current_dir, "scripts")
+if scripts_dir not in sys.path:
+    sys.path.insert(0, scripts_dir)
+
+# Import agents with safer error handling
+AGENTS_AVAILABLE = False
 try:
     from scripts.segmentation_agent import SegmentationAgent
-    from scripts.ensemble_agent import EnsembleAgent
-    # You would also import other agents like ensemble_agent here
     AGENTS_AVAILABLE = True
 except ImportError as e:
     print(f"Error importing agents: {str(e)}")
-    AGENTS_AVAILABLE = False
 
 # Initialize global state
 class AppState:
     def __init__(self):
-        self.output_dir = "output"
+        self.output_dir = join(current_dir, "output")
         os.makedirs(self.output_dir, exist_ok=True)
         
         # Initialize agents if available
-        if AGENTS_AVAILABLE:
-            self.segmentation_agent = SegmentationAgent()
-            self.ensemble_agent = EnsembleAgent()
-            # Initialize other agents as needed
-        else:
-            self.segmentation_agent = None
+        self.segmentation_agent = SegmentationAgent() if AGENTS_AVAILABLE else None
         
         # Track uploaded data
         self.rfm_data_loaded = False
@@ -41,14 +44,16 @@ class AppState:
         files = []
         if os.path.exists(self.output_dir):
             for file in os.listdir(self.output_dir):
-                file_path = os.path.join(self.output_dir, file)
+                file_path = join(self.output_dir, file)
                 if os.path.isfile(file_path):
                     files.append(file)
         return files
     
     def get_file_path(self, filename):
         """Get full path to a file in the output directory"""
-        path = os.path.join(self.output_dir, filename)
+        if filename is None:
+            return None
+        path = join(self.output_dir, filename)
         if os.path.isfile(path):
             return path
         return None
@@ -73,33 +78,47 @@ def save_upload_file(file_obj):
     
     # Create temp file with same extension
     suffix = Path(file_obj.name).suffix
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(file_obj.read())
-        state.temp_files.append(tmp.name)
-        return tmp.name
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(file_obj.read())
+            state.temp_files.append(tmp.name)
+            return tmp.name
+    except Exception as e:
+        print(f"Error saving uploaded file: {str(e)}")
+        return None
 
 def process_message(message, rfm_file, sales_file, chat_history):
     """Process user message and data files"""
+    # Initialize chat history if None
+    if chat_history is None:
+        chat_history = []
+    
     response = ""
     
     # Process file uploads
     if rfm_file is not None and not state.rfm_data_loaded:
         rfm_path = save_upload_file(rfm_file)
-        try:
-            success = state.segmentation_agent.load_data(rfm_path)
-            if success:
-                response += "✅ RFM data loaded successfully!\n\n"
-                state.rfm_data_loaded = True
-            else:
-                response += "❌ Failed to load RFM data. Please check the format.\n\n"
-        except Exception as e:
-            response += f"❌ Error loading RFM data: {str(e)}\n\n"
+        if rfm_path and state.segmentation_agent:
+            try:
+                success = state.segmentation_agent.load_data(rfm_path)
+                if success:
+                    response += "✅ RFM data loaded successfully!\n\n"
+                    state.rfm_data_loaded = True
+                else:
+                    response += "❌ Failed to load RFM data. Please check the format.\n\n"
+            except Exception as e:
+                response += f"❌ Error loading RFM data: {str(e)}\n\n"
+        else:
+            response += "❌ Could not process RFM data file.\n\n"
     
     if sales_file is not None and not state.sales_data_loaded:
         sales_path = save_upload_file(sales_file)
-        # Here you would process sales data with appropriate agent
-        response += "✅ Sales data received! (Sales analysis features coming soon)\n\n"
-        state.sales_data_loaded = True
+        if sales_path:
+            # Here you would process sales data with appropriate agent
+            response += "✅ Sales data received! (Sales analysis features coming soon)\n\n"
+            state.sales_data_loaded = True
+        else:
+            response += "❌ Could not process sales data file.\n\n"
     
     # Process user queries
     if not message:
@@ -148,8 +167,12 @@ What would you like me to help with?
     else:
         response = "I'm not sure how to help with that query. Try asking me to 'perform customer segmentation' or type 'help' to see available options."
     
-    # Add to chat history
-    chat_history.append((message, response))
+    # Add to chat history - use the proper messages format
+    if message:  # Only add user message if it's not empty
+        chat_history.append({"role": "user", "content": message})
+    if response:  # Only add assistant response if it's not empty
+        chat_history.append({"role": "assistant", "content": response})
+    
     return "", chat_history
 
 def generate_sample_data():
@@ -199,15 +222,22 @@ def generate_sample_data():
         df = pd.DataFrame(data)
         
         # Save to output directory
-        output_path = os.path.join(state.output_dir, "sample_rfm_data.csv")
+        output_path = join(state.output_dir, "sample_rfm_data.csv")
         df.to_csv(output_path, index=False)
         
         return f"✅ Sample RFM data created! You can download it from the 'Download Files' section."
     except Exception as e:
         return f"❌ Error creating sample data: {str(e)}"
 
+# Helper for resetting the chat
+def reset_chat():
+    return []
+
+def refresh_file_list():
+    return gr.Dropdown.update(choices=state.update_output_files())
+
 # Create the Gradio interface
-with gr.Blocks(theme=gr.themes.Soft()) as app:
+with gr.Blocks(theme="soft") as app:
     gr.Markdown("# FACETS Assistant")
     
     with gr.Row():
@@ -236,10 +266,12 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
             file_output = gr.File(label="Download", interactive=False)
             
         with gr.Column(scale=2):
+            # Initialize chatbot with correct message format
             chatbot = gr.Chatbot(
+                value=[{"role": "assistant", "content": "Hello! I'm your FACETS assistant. How can I help you today?"}],
                 label="Chat with Analytics Assistant",
                 height=600,
-                bubble=True
+                type='messages'
             )
             msg = gr.Textbox(
                 label="Ask a question",
@@ -252,14 +284,11 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
     # Set up event handlers
     submit_btn.click(process_message, [msg, rfm_file, sales_file, chatbot], [msg, chatbot])
     msg.submit(process_message, [msg, rfm_file, sales_file, chatbot], [msg, chatbot])
-    clear_btn.click(lambda: [], None, chatbot)
-    refresh_btn.click(lambda: gr.Dropdown.update(choices=state.update_output_files()), None, file_list)
+    clear_btn.click(reset_chat, None, chatbot)
+    refresh_btn.click(refresh_file_list, None, file_list)
     download_btn.click(lambda x: state.get_file_path(x), [file_list], [file_output])
     sample_btn.click(generate_sample_data, None, sample_output)
-    
-    # Initialize with welcome message
-    app.load(lambda: process_message("", None, None, []), [msg, rfm_file, sales_file, chatbot], [msg, chatbot])
 
 # Launch the app
 if __name__ == "__main__":
-    app.launch()
+    app.launch(debug=False, show_error=True)
