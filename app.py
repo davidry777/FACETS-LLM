@@ -22,6 +22,11 @@ if scripts_dir not in sys.path:
 AGENTS_AVAILABLE = False
 try:
     from scripts.segmentation_agent import SegmentationAgent
+    from scripts.frontier_agent import FrontierAgent
+    from scripts.retail_price_specialist_agent import RetailPriceSpecialistAgent
+    from scripts.sales_specialist_agent import SalesSpecialistAgent
+    from scripts.varimax_agent import VarimaxAgent
+    from scripts.random_forest_agent import RandomForestAgent
     from scripts.ensemble_agent import EnsembleAgent
     AGENTS_AVAILABLE = True
 except ImportError as e:
@@ -33,9 +38,16 @@ class AppState:
         self.output_dir = join(current_dir, "output")
         os.makedirs(self.output_dir, exist_ok=True)
         
-        # Initialize agents if available
-        self.segmentation_agent = SegmentationAgent() if AGENTS_AVAILABLE else None
+        # Initialize agents with the output directory
+        self.segmentation_agent = SegmentationAgent(output_dir=self.output_dir) if AGENTS_AVAILABLE else None
         self.ensemble_agent = EnsembleAgent() if AGENTS_AVAILABLE else None
+        
+        # Initialize price prediction agents
+        self.retail_price_specialist_agent = RetailPriceSpecialistAgent() if AGENTS_AVAILABLE else None
+        self.sales_specialist_agent = SalesSpecialistAgent() if AGENTS_AVAILABLE else None
+        self.varimax_agent = VarimaxAgent() if AGENTS_AVAILABLE else None
+        self.frontier_agent = FrontierAgent() if AGENTS_AVAILABLE else None
+        self.random_forest_agent = RandomForestAgent() if AGENTS_AVAILABLE else None
         
         # Track uploaded data
         self.rfm_data_loaded = False
@@ -70,6 +82,65 @@ class AppState:
                 except OSError as e:
                     print(f"Error removing file {file}: {e}")
         self.temp_files = []
+        
+    def predict_price(self, description):
+        """Use ensemble agent to predict price for a product description"""
+        if not AGENTS_AVAILABLE:
+            return {"error": "Price prediction agents are not available"}
+        
+        results = {}
+        
+        # Get predictions from individual agents with error handling
+        try:
+            if self.retail_price_specialist_agent:
+                specialist_price = self.retail_price_specialist_agent.price(description)
+                results["retail_specialist"] = round(specialist_price, 2)
+        except Exception as e:
+            print(f"Retail Price Specialist agent error: {str(e)}")
+            results["retail_specialist"] = None
+            
+        try:
+            if self.sales_specialist_agent:
+                sales_specialist_price = self.sales_specialist_agent.price(description)
+                results["sales_specialist"] = round(sales_specialist_price, 2)
+        except Exception as e:
+            print(f"Sales Specialist agent error: {str(e)}")
+            results["sales_specialist"] = None
+            
+        try:
+            if self.varimax_agent:
+                varimax_price = self.varimax_agent.price(description)
+                results["varimax"] = round(varimax_price, 2)
+        except Exception as e:
+            print(f"Varimax agent error: {str(e)}")
+            results["varimax"] = None
+            
+        try:
+            if self.frontier_agent:
+                frontier_price = self.frontier_agent.price(description)
+                results["frontier"] = round(frontier_price, 2)
+        except Exception as e:
+            print(f"Frontier agent error: {str(e)}")
+            results["frontier"] = None
+            
+        try:
+            if self.random_forest_agent:
+                rf_price = self.random_forest_agent.price(description)
+                results["random_forest"] = round(rf_price, 2)
+        except Exception as e:
+            print(f"Random Forest agent error: {str(e)}")
+            results["random_forest"] = None
+            
+        # Get ensemble prediction
+        try:
+            if self.ensemble_agent:
+                ensemble_price = self.ensemble_agent.price(description)
+                results["ensemble"] = round(ensemble_price, 2)
+        except Exception as e:
+            print(f"Ensemble agent error: {str(e)}")
+            results["ensemble"] = None
+            
+        return results
 
 # Create state
 state = AppState()
@@ -162,6 +233,55 @@ def process_message(message, rfm_file, sales_file, chat_history):
                 response += "\n📄 Generated files are available in the 'Download Files' section below."
             except Exception as e:
                 response += f"❌ Error during segmentation: {str(e)}"
+    elif "price" in message.lower() or "cost" in message.lower() or "worth" in message.lower():
+        # Extract product description for price prediction
+        # Check for common formats like "How much is [product]" or "Price for [product]"
+        description = message
+        for prefix in ["how much is", "price for", "predict price for", "price of", "cost of", "value of"]:
+            if prefix in message.lower():
+                description = message.lower().split(prefix, 1)[1].strip()
+                break
+        
+        # Get price predictions
+        predictions = state.predict_price(description)
+        
+        if "error" in predictions:
+            response += f"❌ {predictions['error']}"
+        else:
+            response += f"📊 **Price Predictions for**: \"{description}\"\n\n"
+            
+            if predictions.get("retail_specialist") is not None:
+                response += f"- 🧠 Retail Price Specialist: ${predictions['retail_specialist']:.2f}\n"
+            
+            if predictions.get("sales_specialist") is not None:
+                response += f"- 📈 Sales Specialist: ${predictions['sales_specialist']:.2f}\n"
+            
+            if predictions.get("varimax") is not None:
+                response += f"- 📊 Varimax Agent: ${predictions['varimax']:.2f}\n"
+            
+            if predictions.get("frontier") is not None:
+                response += f"- 🔍 Frontier Agent: ${predictions['frontier']:.2f}\n"
+            
+            if predictions.get("random_forest") is not None:
+                response += f"- 🌲 Random Forest Agent: ${predictions['random_forest']:.2f}\n"
+            
+            response += "\n"
+            
+            if predictions.get("ensemble") is not None:
+                response += f"**🌟 Ensemble Prediction: ${predictions['ensemble']:.2f}**"
+            else:
+                # Calculate a simple average if ensemble is not available
+                available_prices = [p for p in [predictions.get('retail_specialist'),
+                                              predictions.get('sales_specialist'),
+                                              predictions.get('varimax'),
+                                              predictions.get('frontier'), 
+                                              predictions.get('random_forest')] 
+                                  if p is not None]
+                if available_prices:
+                    avg_price = sum(available_prices) / len(available_prices)
+                    response += f"**🌟 Average Prediction: ${avg_price:.2f}**"
+                else:
+                    response += "❌ No price predictions available"
     elif "help" in message.lower():
         response = """
 # How to use this FACETS assistant:
@@ -170,19 +290,31 @@ def process_message(message, rfm_file, sales_file, chat_history):
    - RFM data (Customer ID, Recency, Frequency, Monetary)
    - Sales data (Store ID, Day of Week, Date, Sales, Customers, Promotion)
 
-2. **Ask me questions like:**
+2. **Customer Segmentation:**
    - "Perform customer segmentation" - I'll analyze your RFM data into customer segments
    - "What are my best customer segments?" - After segmentation, I can provide insights
+   - "Show me segment distribution" - I'll display how customers are distributed across segments
+   - "Identify my high-value customers" - I'll highlight your most valuable customer segments
 
-3. **Download generated files:**
+3. **Price Prediction:**
+   - "Predict price for [product description]" - I'll estimate the price using multiple prediction models
+   - "How much is [product description]?" - Get price estimates from different analytical approaches
+   - "What should I charge for [product description]?" - Get pricing recommendations
+   - "Price analysis for [product description]" - Get detailed price breakdown from multiple agents
+
+4. **Download generated files:**
    - Reports (markdown format)
    - Visualizations (PNG images)
+   - Data exports (CSV format)
    - Use the refresh button to see newly generated files
 
-What would you like me to help with?
+5. **Sample Data:**
+   - Click "Generate Sample RFM Data" to create test data if you don't have your own
+
+What would you like me to help with today?
 """
     else:
-        response = "I'm not sure how to help with that query. Try asking me to 'perform customer segmentation' or type 'help' to see available options."
+        response = "I'm not sure how to help with that query. Try asking me to 'perform customer segmentation', 'predict price for [product]', or type 'help' to see available options."
     
     # Add to chat history - use the proper messages format
     if message:  # Only add user message if it's not empty
@@ -251,7 +383,9 @@ def reset_chat():
     return []
 
 def refresh_file_list():
-    return gr.Dropdown.update(choices=state.update_output_files())
+    """Fix for the Dropdown.update error"""
+    files = state.update_output_files()
+    return gr.Dropdown(choices=files)
 
 # Create the Gradio interface
 with gr.Blocks(theme="soft") as app:

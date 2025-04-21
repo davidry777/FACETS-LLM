@@ -2,7 +2,7 @@ import modal
 from agent import Agent
 
 
-class SpecialistAgent(Agent):
+class RetailPriceSpecialistAgent(Agent):
     """
     An Agent that runs the DeepSeek model for price prediction
     """

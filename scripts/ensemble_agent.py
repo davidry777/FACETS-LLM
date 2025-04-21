@@ -5,7 +5,7 @@ from sklearn.linear_model import LinearRegression
 import joblib
 
 from agent import Agent
-from specialist_agent import SpecialistAgent
+from scripts.retail_price_specialist_agent import RetailPriceSpecialistAgent
 from frontier_agent import FrontierAgent
 from random_forest_agent import RandomForestAgent
 
@@ -24,7 +24,7 @@ class EnsembleAgent(Agent):
         self.log("Initializing Ensemble Agent")
         
         # Initialize all component agents
-        self.specialist = SpecialistAgent()
+        self.specialist = RetailPriceSpecialistAgent()
         self.frontier = FrontierAgent(collection)
         self.random_forest = RandomForestAgent()
         

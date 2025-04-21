@@ -14,6 +14,7 @@ class Agent:
     MAGENTA = '\033[35m'
     CYAN = '\033[36m'
     WHITE = '\033[37m'
+    PURPLE = '\033[35m'
     
     # Background color
     BG_BLACK = '\033[40m'

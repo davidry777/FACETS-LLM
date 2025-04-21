@@ -10,7 +10,7 @@ from datetime import datetime
 from openai import OpenAI
 from agent import Agent
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import silhouette_score
 from sklearn.decomposition import PCA
 
@@ -23,14 +23,17 @@ class SegmentationAgent(Agent):
     color = Agent.CYAN
     MODEL = "deepseek-r1:1.5b"
     
-    def __init__(self):
+    def __init__(self, output_dir="output"):
         """
         Set up this instance by connecting to DeepSeek and initializing segmentation state
         """
         self.log("Initializing Segmentation Agent")
         
+        # Store output directory
+        self.output_dir = output_dir
+        
         # Create output directory
-        os.makedirs("output", exist_ok=True)
+        os.makedirs(self.output_dir, exist_ok=True)
         
         # Set up the DeepSeek client via Ollama
         self.client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
@@ -242,22 +245,30 @@ class SegmentationAgent(Agent):
         # Get RFM features for clustering
         X = self.rfm_data[['Recency', 'Frequency', 'Monetary']].copy()
         
-        # Scale features
-        self.scaler = StandardScaler()
+        # Scale features - switch StandardScaler to RobustScaler for better handling of outliers
+        self.scaler = RobustScaler()  # Change to RobustScaler
         X_scaled = self.scaler.fit_transform(X)
         
-        # Find optimal number of clusters if not specified
+        # Force more clusters if optimal number is too small
         if num_segments <= 0:
             num_segments = self._find_optimal_k(X_scaled)
+            num_segments = max(num_segments, 4)  # Force at least 4 clusters
         
-        # Perform K-means clustering
+        # Perform K-means clustering with better initialization
         self.log(f"Performing K-means clustering with {num_segments} clusters")
-        self.kmeans_model = KMeans(n_clusters=num_segments, random_state=42, n_init=10)
+        self.kmeans_model = KMeans(
+            n_clusters=num_segments,
+            random_state=42,
+            n_init=15,  # Increase number of initializations
+            init='k-means++',
+            max_iter=500  # Allow more iterations for convergence
+        )
         self.rfm_data['segment_id'] = self.kmeans_model.fit_predict(X_scaled)
         
-        # Calculate cluster centers in original scale
-        centers_scaled = self.kmeans_model.cluster_centers_
-        centers_original = self.scaler.inverse_transform(centers_scaled)
+        # Debug clustering results
+        unique, counts = np.unique(self.rfm_data['segment_id'], return_counts=True)
+        cluster_distribution = dict(zip(unique, counts))
+        self.log(f"Cluster distribution: {cluster_distribution}")
         
         # Create segment information
         segments = {}
@@ -273,9 +284,9 @@ class SegmentationAgent(Agent):
                 "segment_name": f"Cluster {i}",
                 "count": int(segment_mask.sum()),
                 "percentage": float(segment_mask.sum() / len(self.rfm_data) * 100),
-                "center_recency": float(centers_original[i, 0]),
-                "center_frequency": float(centers_original[i, 1]),
-                "center_monetary": float(centers_original[i, 2]),
+                "center_recency": float(self.kmeans_model.cluster_centers_[i, 0]),
+                "center_frequency": float(self.kmeans_model.cluster_centers_[i, 1]),
+                "center_monetary": float(self.kmeans_model.cluster_centers_[i, 2]),
                 "avg_recency": float(segment_data['Recency'].mean()),
                 "avg_frequency": float(segment_data['Frequency'].mean()),
                 "avg_monetary": float(segment_data['Monetary'].mean()),
@@ -338,7 +349,8 @@ class SegmentationAgent(Agent):
         }
         
         # Save results
-        with open("output/kmeans_segmentation_results.json", "w") as f:
+        results_file = os.path.join(self.output_dir, "kmeans_segmentation_results.json")
+        with open(results_file, "w") as f:
             json.dump(results, f, indent=2)
         
         self.log(f"Segmentation complete - created {len(self.segments)} segments with K-means")
@@ -417,7 +429,7 @@ class SegmentationAgent(Agent):
             report_content = self._generate_fallback_report()
         
         # Save the report
-        output_path = os.path.join("output", output_file)
+        output_path = os.path.join(self.output_dir, output_file)
         with open(output_path, "w") as f:
             f.write(report_content)
         
@@ -562,7 +574,7 @@ class SegmentationAgent(Agent):
         
         # Adjust layout and save
         plt.tight_layout()
-        output_path = os.path.join("output", output_file)
+        output_path = os.path.join(self.output_dir, output_file)
         plt.savefig(output_path)
         plt.close()
         
