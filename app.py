@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import json
+import shutil
 import tempfile
 from typing import Dict, Any, List
 from pathlib import Path
@@ -21,6 +22,7 @@ if scripts_dir not in sys.path:
 AGENTS_AVAILABLE = False
 try:
     from scripts.segmentation_agent import SegmentationAgent
+    from scripts.ensemble_agent import EnsembleAgent
     AGENTS_AVAILABLE = True
 except ImportError as e:
     print(f"Error importing agents: {str(e)}")
@@ -33,6 +35,7 @@ class AppState:
         
         # Initialize agents if available
         self.segmentation_agent = SegmentationAgent() if AGENTS_AVAILABLE else None
+        self.ensemble_agent = EnsembleAgent() if AGENTS_AVAILABLE else None
         
         # Track uploaded data
         self.rfm_data_loaded = False
@@ -76,11 +79,25 @@ def save_upload_file(file_obj):
     if file_obj is None:
         return None
     
-    # Create temp file with same extension
-    suffix = Path(file_obj.name).suffix
     try:
+        # Get file name and create proper extension
+        file_name = file_obj.name
+        suffix = Path(file_name).suffix
+        
+        # Create temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(file_obj.read())
+            # Handle different types of file objects from Gradio
+            if hasattr(file_obj, 'read'):
+                # File-like object with read method
+                tmp.write(file_obj.read())
+            elif hasattr(file_obj, 'name') and os.path.exists(file_obj.name):
+                # Object with a name attribute pointing to a valid file
+                with open(file_obj.name, 'rb') as f:
+                    tmp.write(f.read())
+            else:
+                # Assume it's the file path as a string
+                shutil.copy(str(file_obj), tmp.name)
+                
             state.temp_files.append(tmp.name)
             return tmp.name
     except Exception as e:

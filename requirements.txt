@@ -11,7 +11,7 @@ langchain
 peft
 openai
 openai-agents
-openpyxl
+openpyxl==3.0.9
 matplotlib
 plotly
 seaborn

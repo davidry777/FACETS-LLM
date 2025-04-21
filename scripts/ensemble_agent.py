@@ -16,7 +16,7 @@ class EnsembleAgent(Agent):
     name = "Ensemble Agent"
     color = Agent.YELLOW
     
-    def __init__(self, collection=None, model_path='ensemble_model.pkl'):
+    def __init__(self, collection=None, model_path='./models/ensemble_model.pkl'):
         """
         Create an instance of Ensemble, by creating each of the models
         And loading the weights of the Ensemble

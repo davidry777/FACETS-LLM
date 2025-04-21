@@ -4,8 +4,8 @@ channels:
   - defaults
 dependencies:
   - python=3.11
-  - numpy
-  - pandas
+  - numpy>=1.19.5
+  - pandas>=1.3.0
   - scikit-learn
   - statsmodels
   - prophet
@@ -16,7 +16,7 @@ dependencies:
   - langchain
   - peft
   - openai
-  - openpyxl=3.0.9
+  - openpyxl==3.0.9
   - matplotlib
   - plotly
   - seaborn
@@ -26,3 +26,5 @@ dependencies:
   - pip
   - pip:
     - openai-agents
+    - gradio==4.19.0
+    - sentence-transformers>=2.2.0
