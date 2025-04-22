@@ -24,8 +24,6 @@ try:
     from scripts.segmentation_agent import SegmentationAgent
     from scripts.frontier_agent import FrontierAgent
     from scripts.retail_price_specialist_agent import RetailPriceSpecialistAgent
-    from scripts.sales_specialist_agent import SalesSpecialistAgent
-    from scripts.varimax_agent import VarimaxAgent
     from scripts.random_forest_agent import RandomForestAgent
     from scripts.ensemble_agent import EnsembleAgent
     AGENTS_AVAILABLE = True
@@ -44,8 +42,6 @@ class AppState:
         
         # Initialize price prediction agents
         self.retail_price_specialist_agent = RetailPriceSpecialistAgent() if AGENTS_AVAILABLE else None
-        self.sales_specialist_agent = SalesSpecialistAgent() if AGENTS_AVAILABLE else None
-        self.varimax_agent = VarimaxAgent() if AGENTS_AVAILABLE else None
         self.frontier_agent = FrontierAgent() if AGENTS_AVAILABLE else None
         self.random_forest_agent = RandomForestAgent() if AGENTS_AVAILABLE else None
         
@@ -98,22 +94,6 @@ class AppState:
         except Exception as e:
             print(f"Retail Price Specialist agent error: {str(e)}")
             results["retail_specialist"] = None
-            
-        try:
-            if self.sales_specialist_agent:
-                sales_specialist_price = self.sales_specialist_agent.price(description)
-                results["sales_specialist"] = round(sales_specialist_price, 2)
-        except Exception as e:
-            print(f"Sales Specialist agent error: {str(e)}")
-            results["sales_specialist"] = None
-            
-        try:
-            if self.varimax_agent:
-                varimax_price = self.varimax_agent.price(description)
-                results["varimax"] = round(varimax_price, 2)
-        except Exception as e:
-            print(f"Varimax agent error: {str(e)}")
-            results["varimax"] = None
             
         try:
             if self.frontier_agent:
@@ -253,12 +233,6 @@ def process_message(message, rfm_file, sales_file, chat_history):
             if predictions.get("retail_specialist") is not None:
                 response += f"- 🧠 Retail Price Specialist: ${predictions['retail_specialist']:.2f}\n"
             
-            if predictions.get("sales_specialist") is not None:
-                response += f"- 📈 Sales Specialist: ${predictions['sales_specialist']:.2f}\n"
-            
-            if predictions.get("varimax") is not None:
-                response += f"- 📊 Varimax Agent: ${predictions['varimax']:.2f}\n"
-            
             if predictions.get("frontier") is not None:
                 response += f"- 🔍 Frontier Agent: ${predictions['frontier']:.2f}\n"
             
@@ -272,10 +246,8 @@ def process_message(message, rfm_file, sales_file, chat_history):
             else:
                 # Calculate a simple average if ensemble is not available
                 available_prices = [p for p in [predictions.get('retail_specialist'),
-                                              predictions.get('sales_specialist'),
-                                              predictions.get('varimax'),
-                                              predictions.get('frontier'), 
-                                              predictions.get('random_forest')] 
+                                               predictions.get('frontier'), 
+                                               predictions.get('random_forest')] 
                                   if p is not None]
                 if available_prices:
                     avg_price = sum(available_prices) / len(available_prices)
