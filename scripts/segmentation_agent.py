@@ -45,6 +45,7 @@ class SegmentationAgent(Agent):
         self.segment_strategies = None
         self.kmeans_model = None
         self.scaler = None
+        self.min_clusters = 3  # Minimum number of clusters to ensure
         
         self.log(f"Segmentation Agent is ready with {self.MODEL}")
     
@@ -105,11 +106,12 @@ class SegmentationAgent(Agent):
     
     def messages_for_cluster_interpretation(self, clusters: Dict[str, Any]) -> List[Dict[str, str]]:
         """
-        Create the message list for generating cluster interpretations
+        Create the message list for generating cluster interpretations with improved prompting
         """
         system_message = """You are an expert in customer segmentation and marketing analytics.
         Your task is to interpret K-means clusters from RFM (Recency, Frequency, Monetary) data 
-        and provide meaningful segment names and descriptions."""
+        and provide meaningful segment names and descriptions. Follow the standard RFM segmentation
+        framework used in marketing analytics."""
         
         user_message = f"""
         I have performed K-means clustering on customer RFM data and need your help interpreting the clusters.
@@ -117,8 +119,21 @@ class SegmentationAgent(Agent):
         Here are the clusters with their average RFM values and other statistics:
         {json.dumps(clusters, indent=2)}
         
+        Remember that:
+        - Recency: Days since last purchase (LOWER is better)
+        - Frequency: Number of purchases (HIGHER is better)
+        - Monetary: Average spending per customer (HIGHER is better)
+        
+        Use these standard segment names when appropriate:
+        - Champions: Recent purchases, frequent buyers, high spending
+        - Loyal Customers: Buy regularly but not as recently as Champions
+        - New Customers: Recent first purchase, low frequency/spend
+        - At-Risk Customers: Above-average recency, good past purchase frequency
+        - Big Spenders: High monetary values but lower frequency
+        - Lost Customers: High recency (haven't purchased in a long time)
+        
         For each cluster, please:
-        1. Provide a descriptive name that reflects the customer behavior (like "Champions", "At Risk", etc.)
+        1. Provide a descriptive segment name from the standard list above when applicable, or create a custom name if needed
         2. Write a detailed description of the customer behavior and characteristics
         3. Suggest specific marketing strategies tailored to this customer segment
         
@@ -210,26 +225,43 @@ class SegmentationAgent(Agent):
                 return None
     
     def _find_optimal_k(self, X_scaled, max_k=10) -> int:
-        """Find optimal number of clusters using silhouette score"""
+        """Find optimal number of clusters using silhouette score and elbow method"""
         self.log("Finding optimal number of clusters")
         
-        if len(X_scaled) < 3:
-            return 3  # Minimum clusters for meaningful segmentation
+        if len(X_scaled) < self.min_clusters:
+            return self.min_clusters
         
         max_k = min(max_k, len(X_scaled) - 1)
         silhouette_scores = []
+        inertia_values = []
         k_range = range(2, max_k + 1)
         
         for k in k_range:
-            kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+            kmeans = KMeans(n_clusters=k, random_state=42, n_init=15, init='k-means++')
             cluster_labels = kmeans.fit_predict(X_scaled)
             silhouette_avg = silhouette_score(X_scaled, cluster_labels)
             silhouette_scores.append(silhouette_avg)
-            self.log(f"K={k}, Silhouette Score={silhouette_avg:.4f}")
+            inertia_values.append(kmeans.inertia_)
+            self.log(f"K={k}, Silhouette Score={silhouette_avg:.4f}, Inertia={kmeans.inertia_:.2f}")
         
-        # Find the best k
-        optimal_k = k_range[np.argmax(silhouette_scores)]
+        # Find the best k using both silhouette score and elbow method
+        # Calculate inertia differences (for elbow method)
+        inertia_diffs = np.diff(inertia_values)
+        inertia_diffs = np.append(inertia_diffs, inertia_diffs[-1])  # pad last element
+        
+        # Normalize both metrics between 0 and 1
+        norm_silhouette = np.array(silhouette_scores) / max(silhouette_scores)
+        norm_inertia_diffs = inertia_diffs / max(inertia_diffs)
+        
+        # Combined score: high silhouette and significant inertia drop
+        combined_score = norm_silhouette + norm_inertia_diffs
+        
+        optimal_k = k_range[np.argmax(combined_score)]
         self.log(f"Optimal number of clusters: {optimal_k}")
+        
+        # Force a minimum of desired clusters for better segmentation
+        optimal_k = max(optimal_k, self.min_clusters)
+        self.log(f"Final number of clusters (after enforcing minimum): {optimal_k}")
         return optimal_k
     
     def perform_segmentation(self, num_segments: int = 0) -> Dict[str, Any]:
@@ -242,28 +274,56 @@ class SegmentationAgent(Agent):
             self.log("No data loaded. Please load data first.")
             return {}
         
-        # Get RFM features for clustering
-        X = self.rfm_data[['Recency', 'Frequency', 'Monetary']].copy()
+        # Filter outliers first, similar to notebook approach
+        filtered_data = self._filter_outliers(self.rfm_data)
         
-        # Scale features - switch StandardScaler to RobustScaler for better handling of outliers
-        self.scaler = RobustScaler()  # Change to RobustScaler
+        # Get RFM features for clustering
+        X = filtered_data[['Recency', 'Frequency', 'Monetary']].copy()
+        
+        # Scale features using RobustScaler (same as in notebook)
+        self.scaler = RobustScaler()
         X_scaled = self.scaler.fit_transform(X)
         
-        # Force more clusters if optimal number is too small
+        # Find optimal number of clusters if not specified
         if num_segments <= 0:
-            num_segments = self._find_optimal_k(X_scaled)
-            num_segments = max(num_segments, 4)  # Force at least 4 clusters
+            num_segments = self._find_optimal_k(X_scaled, max_k=8)
         
-        # Perform K-means clustering with better initialization
+        # Perform K-means clustering with improved parameters
         self.log(f"Performing K-means clustering with {num_segments} clusters")
         self.kmeans_model = KMeans(
             n_clusters=num_segments,
             random_state=42,
-            n_init=15,  # Increase number of initializations
+            n_init=20,  # Increase number of initializations for better stability
             init='k-means++',
-            max_iter=500  # Allow more iterations for convergence
+            max_iter=1000,  # Increased from 500 for better convergence
+            tol=1e-5  # Tighter tolerance for better convergence
         )
-        self.rfm_data['segment_id'] = self.kmeans_model.fit_predict(X_scaled)
+        
+        # Fit model on filtered data
+        cluster_labels = self.kmeans_model.fit_predict(X_scaled)
+        filtered_data['segment_id'] = cluster_labels
+        
+        # Now propagate cluster assignments to the original dataset
+        # Create a mapping from customer ID to cluster
+        customer_to_cluster = dict(zip(filtered_data['Customer ID'], filtered_data['segment_id']))
+        
+        # Apply to the entire original dataset
+        self.rfm_data['segment_id'] = self.rfm_data['Customer ID'].map(customer_to_cluster)
+        
+        # Fill any unassigned customers (those that were outliers)
+        if self.rfm_data['segment_id'].isna().any():
+            # For unassigned customers, predict their cluster
+            missing_mask = self.rfm_data['segment_id'].isna()
+            missing_customers = self.rfm_data[missing_mask]
+            
+            if len(missing_customers) > 0:
+                missing_X = missing_customers[['Recency', 'Frequency', 'Monetary']].values
+                missing_X_scaled = self.scaler.transform(missing_X)
+                missing_labels = self.kmeans_model.predict(missing_X_scaled)
+                self.rfm_data.loc[missing_mask, 'segment_id'] = missing_labels
+        
+        # Ensure segment_id is integer type
+        self.rfm_data['segment_id'] = self.rfm_data['segment_id'].astype(int)
         
         # Debug clustering results
         unique, counts = np.unique(self.rfm_data['segment_id'], return_counts=True)
@@ -293,12 +353,18 @@ class SegmentationAgent(Agent):
                 "total_monetary": float(segment_data['Monetary'].sum()),
                 "std_recency": float(segment_data['Recency'].std()),
                 "std_frequency": float(segment_data['Frequency'].std()),
-                "std_monetary": float(segment_data['Monetary'].std())
+                "std_monetary": float(segment_data['Monetary'].std()),
+                "min_recency": float(segment_data['Recency'].min()),
+                "max_recency": float(segment_data['Recency'].max()),
+                "min_frequency": float(segment_data['Frequency'].min()),
+                "max_frequency": float(segment_data['Frequency'].max()),
+                "min_monetary": float(segment_data['Monetary'].min()),
+                "max_monetary": float(segment_data['Monetary'].max())
             }
         
         self.segments = segments
         
-        # Use LLM to interpret the clusters
+        # Use LLM to interpret the clusters with improved prompting
         try:
             self.log(f"Calling {self.MODEL} to interpret clusters")
             response = self.client.chat.completions.create(
@@ -319,9 +385,8 @@ class SegmentationAgent(Agent):
                 self.segment_descriptions = insights["descriptions"]
                 self.segment_strategies = insights["strategies"]
                 
-                # Use fallback names
-                for segment_id, segment in self.segments.items():
-                    segment["segment_name"] = f"Segment {segment_id}"
+                # Use fallback names based on RFM patterns instead of generic names
+                self._apply_rfm_based_names(self.segments)
             else:
                 # Update segment names
                 for segment_id, new_name in cluster_insights["renamed_clusters"].items():
@@ -337,6 +402,7 @@ class SegmentationAgent(Agent):
             insights = self._get_fallback_insights(self.segments)
             self.segment_descriptions = insights["descriptions"]
             self.segment_strategies = insights["strategies"]
+            self._apply_rfm_based_names(self.segments)
         
         # Compile results
         results = {
@@ -355,6 +421,65 @@ class SegmentationAgent(Agent):
         
         self.log(f"Segmentation complete - created {len(self.segments)} segments with K-means")
         return results
+    
+    def _apply_rfm_based_names(self, segments):
+        """Apply RFM-based names to clusters based on their characteristics"""
+        # Sort segments by their RFM metrics for consistent naming
+        sorted_segments = []
+        for seg_id, segment in segments.items():
+            # Calculate RFM scores (1-5 scale)
+            r_score = 5 - min(int(segment['avg_recency'] / 60) + 1, 5)  # Lower recency is better
+            f_score = min(int(segment['avg_frequency'] / 5) + 1, 5)  # Higher frequency is better
+            m_score = min(int(segment['avg_monetary'] / 200) + 1, 5)  # Higher monetary is better
+            
+            rfm_score = r_score * 100 + f_score * 10 + m_score  # Combine for sorting
+            sorted_segments.append((seg_id, segment, rfm_score, r_score, f_score, m_score))
+        
+        # Sort by RFM score descending
+        sorted_segments.sort(key=lambda x: x[2], reverse=True)
+        
+        # Name segments based on their RFM patterns and relative position
+        for i, (seg_id, segment, _, r_score, f_score, m_score) in enumerate(sorted_segments):
+            if r_score >= 4 and f_score >= 4 and m_score >= 4:
+                name = "Champions"
+            elif r_score >= 4 and f_score >= 3:
+                name = "Loyal Customers"
+            elif r_score >= 4 and f_score <= 2:
+                name = "New Customers"
+            elif r_score <= 2 and f_score >= 3:
+                name = "At-Risk Customers"
+            elif r_score <= 2 and f_score <= 2 and m_score <= 2:
+                name = "Lost Customers"
+            elif m_score >= 4 and f_score <= 2:
+                name = "Big Spenders"
+            elif r_score <= 2 and m_score >= 4:
+                name = "At-Risk High Value"
+            else:
+                name = "Regular Customers"
+            
+            # Update segment name
+            segment["segment_name"] = name
+            # Update in dataframe
+            self.rfm_data.loc[self.rfm_data['segment_id'] == int(seg_id), 'segment_name'] = name
+    
+    def _filter_outliers(self, dataframe):
+        """Filter outliers using IQR method, similar to notebook approach"""
+        self.log("Filtering outliers using IQR method")
+        df = dataframe.copy()
+        
+        for column in ['Recency', 'Frequency', 'Monetary']:
+            Q1 = df[column].quantile(0.01)  # Use 1st percentile instead of 0.25 for less aggressive filtering
+            Q3 = df[column].quantile(0.99)  # Use 99th percentile instead of 0.75
+            IQR = Q3 - Q1
+            
+            lower_bound = Q1 - 1.5 * IQR
+            upper_bound = Q3 + 1.5 * IQR
+            
+            # Filter outliers
+            df = df[(df[column] >= lower_bound) & (df[column] <= upper_bound)]
+        
+        self.log(f"After outlier removal: {len(df)} customers (removed {len(dataframe) - len(df)} outliers)")
+        return df
     
     def _get_fallback_insights(self, segments: Dict[str, Any]) -> Dict[str, Any]:
         """Generate fallback insights if LLM fails"""
@@ -491,6 +616,11 @@ class SegmentationAgent(Agent):
         # Create a figure with 4 subplots
         fig, axes = plt.subplots(2, 2, figsize=(15, 12))
         
+        # Use a consistent color palette
+        unique_segments = self.rfm_data['segment_name'].unique()
+        color_palette = sns.color_palette('tab10', len(unique_segments))
+        segment_colors = dict(zip(unique_segments, color_palette))
+        
         # 1. Pie chart of segment sizes
         segment_counts = self.rfm_data['segment_name'].value_counts()
         axes[0, 0].pie(
@@ -498,7 +628,7 @@ class SegmentationAgent(Agent):
             labels=segment_counts.index, 
             autopct='%1.1f%%', 
             startangle=90,
-            colors=sns.color_palette('tab10', len(segment_counts))
+            colors=[segment_colors[seg] for seg in segment_counts.index]
         )
         axes[0, 0].set_title('Customer Segment Distribution')
         
@@ -508,7 +638,7 @@ class SegmentationAgent(Agent):
             x='Recency',
             y='Frequency',
             hue='segment_name',
-            palette='tab10',
+            palette=segment_colors,
             alpha=0.7,
             ax=axes[0, 1]
         )
@@ -520,62 +650,39 @@ class SegmentationAgent(Agent):
             x='Frequency',
             y='Monetary',
             hue='segment_name',
-            palette='tab10',
+            palette=segment_colors,
             alpha=0.7,
             ax=axes[1, 0]
         )
         axes[1, 0].set_title('Frequency vs Monetary by Segment')
         
-        # 4. PCA visualization if more than 2 segments
-        if len(self.segments) > 2:
-            # Apply PCA for visualization
-            X = self.rfm_data[['Recency', 'Frequency', 'Monetary']]
-            pca = PCA(n_components=2)
-            X_pca = pca.fit_transform(self.scaler.transform(X))
-            
-            # Create a dataframe with PCA results
-            pca_df = pd.DataFrame(data=X_pca, columns=['PC1', 'PC2'])
-            pca_df['segment_name'] = self.rfm_data['segment_name'].values
-            
-            # Plot PCA results
-            sns.scatterplot(
-                data=pca_df,
-                x='PC1',
-                y='PC2',
-                hue='segment_name',
-                palette='tab10',
-                alpha=0.7,
-                ax=axes[1, 1]
-            )
-            var_explained = pca.explained_variance_ratio_ * 100
-            axes[1, 1].set_title(f'PCA Visualization (Explained Variance: {var_explained[0]:.1f}%, {var_explained[1]:.1f}%)')
-        else:
-            # Bar chart of average metrics by segment
-            segment_avgs = self.rfm_data.groupby('segment_name')[['Recency', 'Frequency', 'Monetary']].mean()
-            
-            # Normalize the metrics for better visualization
-            segment_avgs_norm = segment_avgs.copy()
-            for col in segment_avgs_norm.columns:
-                if col == 'Recency':
-                    # For Recency, lower is better, so invert the normalization
-                    segment_avgs_norm[col] = 1 - (segment_avgs_norm[col] / segment_avgs_norm[col].max())
-                else:
-                    segment_avgs_norm[col] = segment_avgs_norm[col] / segment_avgs_norm[col].max()
-            
-            segment_avgs_norm.plot(
-                kind='bar',
-                ax=axes[1, 1],
-                color=['#ff9999', '#66b3ff', '#99ff99'],
-                rot=45
-            )
-            axes[1, 1].set_title('Normalized RFM Metrics by Segment')
-            axes[1, 1].set_ylim(0, 1)
-            axes[1, 1].legend(title='Metric')
+        # 4. PCA visualization
+        # Apply PCA for visualization
+        X = self.rfm_data[['Recency', 'Frequency', 'Monetary']]
+        pca = PCA(n_components=2)
+        X_pca = pca.fit_transform(self.scaler.transform(X))
+        
+        # Create a dataframe with PCA results
+        pca_df = pd.DataFrame(data=X_pca, columns=['PC1', 'PC2'])
+        pca_df['segment_name'] = self.rfm_data['segment_name'].values
+        
+        # Plot PCA results
+        sns.scatterplot(
+            data=pca_df,
+            x='PC1',
+            y='PC2',
+            hue='segment_name',
+            palette=segment_colors,
+            alpha=0.7,
+            ax=axes[1, 1]
+        )
+        var_explained = pca.explained_variance_ratio_ * 100
+        axes[1, 1].set_title(f'PCA Visualization (Explained Variance: {var_explained[0]:.1f}%, {var_explained[1]:.1f}%)')
         
         # Adjust layout and save
         plt.tight_layout()
         output_path = os.path.join(self.output_dir, output_file)
-        plt.savefig(output_path)
+        plt.savefig(output_path, dpi=300)
         plt.close()
         
         self.log(f"Visualization saved to {output_path}")
